@@ -5,6 +5,9 @@ name = "pypi"
 
 [packages]
 jsonschema = "*"
+redis = "*"
+pottery = "*"
+requests = "*"
 
 [dev-packages]
 

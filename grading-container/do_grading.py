@@ -1,61 +1,63 @@
 import json
-from typing import Dict
+import shutil
+from typing import Dict, List
 from jsonschema import validate
-from audit import Audit
-from grading_job.build_script.code_file_info import CodeFileInfo
-from grading_job.build_script.code_file_source import CodeFileSource
-from grading_job.build_script.sub_mime_types import SubmissionMIMEType
+from jsonschema.exceptions import ValidationError
+from exceptions import GradingJobProcessingException
+from grading_job.audit import Audit
+from grading_job.build_script.code_file.code_file_info import CodeFileInfo
+from grading_job.build_script.code_file.code_file_source import CodeFileSource
+from grading_job.build_script.code_file.processing.code_file_processing_strategy import CodeFileProcessor
+from grading_job.build_script.code_file.sub_mime_types import SubmissionMIMEType
+from grading_job.build_script.preprocess import GradingScriptPreprocessor
 from grading_job.exec_secret import GradingJobExecutionSecret
-from grading_job.grading_job_builder import GradingJobBuilder
 from grading_job.grading_job_output import GradingJobOutput
+from grading_job.grading_script.grading_script_command import GradingScriptCommand
+from validations.grading_job_json_types import CodeFileInfoJSON, GradingJobJSON, GradingJobOutputJSON, GradingScriptCommandJSON
 from validations.schemas.grading_job_schema import GradingJobSchema
-from grading_job.grading_job import GradingJob
-from grading_job.grading_script.grading_script import GradingScript
 
-def build_grading_job_from_json(grading_job_json: Dict) -> GradingJob:
-  """
-  Given a JSON object for a Grading Job, use the GradingJobBuilder class
-  to create an instance of a GradingJob to execute.
-  """
-  builder = GradingJobBuilder()
-  submission_id: str = grading_job_json['submission_id']
-  grade_id: str = grading_job_json['grade_id']
-  student_code_details = grading_job_json['student_code']
-  student_code_url = student_code_details['url']
-  student_code_mime = SubmissionMIMEType(student_code_details['mime_type'])
-  student_code_info = CodeFileInfo(student_code_url, student_code_mime, 
-    CodeFileSource.TARGET)
-  grading_script: GradingScript = GradingJob.generate_grading_script(grading_job_json['script'])
-  builder.create_grading_job(submission_id, grade_id, student_code_info, grading_script)
-  if 'starter_code' in grading_job_json:
-    start_code_details = grading_job_json['starter_code']
-    start_code_url = start_code_details["url"]
-    start_code_mime = SubmissionMIMEType(start_code_details["mime_type"])
-    builder.add_starter_code(CodeFileInfo(start_code_url, start_code_mime, 
-      CodeFileSource.FIXTURE))
-  if 'professor_code' in grading_job_json:
-    prof_code_details = grading_job_json['professor_code']
-    prof_code_url = prof_code_details['url']
-    prof_code_mime = SubmissionMIMEType(prof_code_details['mime_type'])
-    builder.add_professor_code(CodeFileInfo(prof_code_url, prof_code_mime, 
-      CodeFileSource.TEST))
-  if 'max_retries' in grading_job_json:
-    builder.add_max_retries(grading_job_json['max_retries'])
-  return builder.get_grading_job()
+def is_valid_grading_job(json_grading_job: GradingJobJSON):
+  try:
+    validate(json_grading_job, GradingJobSchema)
+    return True
+  except ValidationError:
+    return False
 
-def do_grading() -> GradingJobOutput:
-  audit = Audit()
-  secret = GradingJobExecutionSecret().get_secret()
-  example_job_config_path = "tests/fixtures/files/live-URL-student-only.json"
-  example_job_config_file = open(example_job_config_path, "r")
-  example_job_json = json.load(example_job_config_file)
-  example_job_config_file.close()
-  example_job = build_grading_job_from_json(example_job_json)
-  output = example_job.execute_grading_job(secret, audit)
-  json_repr = output.to_json()
-  json_str = json.dumps(json_repr)
-  print(json_str)
+def push_results_to_bottlenose(grading_job_output: GradingJobOutput):
+  json_output: GradingJobOutputJSON = grading_job_output.to_json()
+  # TODO: Add an API endpoint URL to Bottlenose
+  pass
+
+def clean_up_folders(secret: str):
+  shutil.rmtree(f"{secret}/")
+
+def do_grading(json_grading_job: GradingJobOutputJSON) -> GradingJobOutput:
+  # if not is_valid_grading_job(json_grading_job):
+  #   raise GradingJobProcessingException("The given JSON does not properly match the schema of a GradingJob.")
+  secret: str = GradingJobExecutionSecret.get_secret()
+  # TODO: Pull credentials (e.g., submission id, student id, etc.)
+  code_files: List[CodeFileInfo] = []
+  for source in [s.value for s in CodeFileSource]:
+    if source not in json_grading_job:
+      continue
+    json_code_file: CodeFileInfoJSON = json_grading_job[source]
+    code_file = CodeFileInfo(json_code_file["url"], SubmissionMIMEType(json_code_file["mime_type"]), 
+      CodeFileSource(source))
+    code_files.append(code_file)    
+  commands: List[GradingScriptCommandJSON] = json_grading_job["script"]
+  if "timeout" in json_grading_job:
+    preprocessor = GradingScriptPreprocessor(secret, commands, code_files, CodeFileProcessor(), 
+      json_grading_job["timeout"])
+  else:
+    preprocessor = GradingScriptPreprocessor(secret, commands, code_files, CodeFileProcessor())
+  script: GradingScriptCommand = preprocessor.preprocess_job()
+  output: GradingJobOutput = script.execute([])
+  clean_up_folders(secret)
+  print(output.get_tap_output())
 
 
 if __name__ == "__main__":
-  do_grading()
+  test_file = open("tests/fixtures/files/live-URL-student-only.json", "r")
+  json_job = json.load(test_file)
+  test_file.close()
+  do_grading(json_job)
